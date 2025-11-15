@@ -3,6 +3,7 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 import 'dart:convert';
 import 'dart:async';
 import 'dart:io';
+import 'dart:math';
 import 'package:flutter/services.dart';
 
 void main() {
@@ -14,7 +15,7 @@ void main() {
     DeviceOrientation.landscapeRight,
   ]);
   
-  // Hide status bar and navigation bar (lean back mode)
+  // Auto-hide navigation bars after timeout
   SystemChrome.setEnabledSystemUIMode(SystemUiMode.leanBack);
   
   runApp(const PocketPadApp());
@@ -52,12 +53,18 @@ class _PocketPadHomeState extends State<PocketPadHome> {
   bool _isScanning = false;
   String _serverIp = '';
   String _statusMessage = 'Ready to scan';
-  bool _isImmersiveMode = true; // Track immersive mode state
+
   
   // For relative movement tracking
   Offset? _lastTouchPosition;
   bool _isDragging = false;
   static const double _movementThreshold = 2.0; // Minimum movement to register
+  
+  // For two-finger gestures
+  Map<int, Offset> _activePointers = {};
+  Offset? _lastTwoFingerCenter;
+  bool _sessionLogged = false; // Track if session already logged
+  double _zoomLevel = 1.0; // Zoom level control
 
   @override
   void initState() {
@@ -68,29 +75,24 @@ class _PocketPadHomeState extends State<PocketPadHome> {
     });
     // Start connection monitoring
     _startConnectionMonitoring();
+    // Start auto-hide timer
+    _startAutoHideTimer();
   }
 
-  void _toggleImmersiveMode() {
-    setState(() {
-      _isImmersiveMode = !_isImmersiveMode;
-    });
-    
-    if (_isImmersiveMode) {
-      // Lean back mode prevents edge gestures
+  void _startAutoHideTimer() {
+    // Hide UI after 3 seconds of no interaction
+    Timer.periodic(Duration(seconds: 3), (timer) {
       SystemChrome.setEnabledSystemUIMode(SystemUiMode.leanBack);
-    } else {
-      SystemChrome.setEnabledSystemUIMode(
-        SystemUiMode.manual,
-        overlays: [SystemUiOverlay.top, SystemUiOverlay.bottom],
-      );
-    }
+    });
   }
+
+
 
   void _startConnectionMonitoring() {
     // Check connection every 3 seconds (more frequent)
     Timer.periodic(Duration(seconds: 3), (timer) {
       if (!_isConnected && !_isScanning && _serverIp.isNotEmpty) {
-        print('🔄 Auto-reconnecting...');
+        // Auto-reconnecting silently
         _reconnectToKnownServer();
       }
     });
@@ -103,7 +105,7 @@ class _PocketPadHomeState extends State<PocketPadHome> {
           final healthCheck = json.encode({'type': 'health_check'});
           _channel!.sink.add(healthCheck);
         } catch (e) {
-          print('🚫 Health check failed: $e');
+          // Health check failed
           setState(() {
             _isConnected = false;
             _statusMessage = 'Health check failed - reconnecting...';
@@ -172,7 +174,6 @@ class _PocketPadHomeState extends State<PocketPadHome> {
         
       } catch (e) {
         // Connection failed, try next IP
-        print('Connection to $ip failed: $e');
         continue;
       }
     }
@@ -187,12 +188,12 @@ class _PocketPadHomeState extends State<PocketPadHome> {
   void _setupChannelListeners() {
     _channel?.stream.listen(
       (message) {
-        print('Server response: $message');
+        // Server response received
         // All server messages indicate the connection is alive
         // WebSocket library handles ping/pong automatically
       },
       onError: (error) {
-        print('❌ Connection error: $error');
+        // Connection error
         setState(() {
           _isConnected = false;
           _statusMessage = 'Connection lost - will auto-reconnect';
@@ -205,7 +206,7 @@ class _PocketPadHomeState extends State<PocketPadHome> {
         });
       },
       onDone: () {
-        print('🔌 Connection closed');
+        // Connection closed
         setState(() {
           _isConnected = false;
           _statusMessage = 'Disconnected - will auto-reconnect';
@@ -231,9 +232,9 @@ class _PocketPadHomeState extends State<PocketPadHome> {
           // Send a simple message to keep connection alive
           final keepalive = json.encode({'type': 'keepalive'});
           _channel!.sink.add(keepalive);
-          print('📡 Keepalive sent');
+          // Keepalive sent
         } catch (e) {
-          print('❌ Keepalive failed: $e');
+          // Keepalive failed
           timer.cancel();
           setState(() {
             _isConnected = false;
@@ -287,10 +288,10 @@ class _PocketPadHomeState extends State<PocketPadHome> {
       });
       
       _setupChannelListeners();
-      print('✅ Reconnected to $_serverIp');
+      // Reconnected successfully
       
     } catch (e) {
-      print('❌ Reconnection failed: $e');
+      // Reconnection failed
       setState(() {
         _isConnected = false;
         _statusMessage = 'Reconnection failed - scanning for server...';
@@ -312,7 +313,7 @@ class _PocketPadHomeState extends State<PocketPadHome> {
         });
         _channel!.sink.add(message);
       } catch (e) {
-        print('❌ Send failed: $e');
+        // Send failed
         setState(() {
           _isConnected = false;
           _statusMessage = 'Send failed - reconnecting...';
@@ -335,7 +336,7 @@ class _PocketPadHomeState extends State<PocketPadHome> {
         });
         _channel!.sink.add(message);
       } catch (e) {
-        print('❌ Send failed: $e');
+        // Send failed
         setState(() {
           _isConnected = false;
           _statusMessage = 'Send failed - reconnecting...';
@@ -343,6 +344,27 @@ class _PocketPadHomeState extends State<PocketPadHome> {
         _reconnectToKnownServer();
       }
     }
+  }
+  
+  void _sendZoomLevel(double level) {
+    if (_channel != null && _isConnected) {
+      try {
+        final message = json.encode({
+          'type': 'zoom_level',
+          'level': level,
+        });
+        _channel!.sink.add(message);
+        print('🔍 Zoom level: ${level.toStringAsFixed(1)}x');
+      } catch (e) {
+        // Zoom send failed
+      }
+    }
+  }
+  
+  double _calculateDistance(Offset point1, Offset point2) {
+    final dx = point1.dx - point2.dx;
+    final dy = point1.dy - point2.dy;
+    return sqrt(dx * dx + dy * dy);
   }
 
   @override
@@ -414,57 +436,54 @@ class _PocketPadHomeState extends State<PocketPadHome> {
                 ),
               ),
             
-            // Immersive Mode Toggle
+            // Zoom Control Slider
             Padding(
               padding: const EdgeInsets.all(16),
-              child: SwitchListTile(
-                title: const Text('Lock Navigation Bars'),
-                subtitle: Text(_isImmersiveMode 
-                  ? 'Locked (prevents edge swipe gestures)' 
-                  : 'Unlocked (edge swipes work)'),
-                value: _isImmersiveMode,
-                onChanged: (value) => _toggleImmersiveMode(),
-                secondary: Icon(_isImmersiveMode ? Icons.lock : Icons.lock_open),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('Zoom Level: ${_zoomLevel.toStringAsFixed(1)}x'),
+                  Slider(
+                    value: _zoomLevel,
+                    min: 0.5,
+                    max: 3.0,
+                    divisions: 10,
+                    onChanged: (value) {
+                      setState(() {
+                        _zoomLevel = value;
+                      });
+                      _sendZoomLevel(value);
+                    },
+                  ),
+                ],
               ),
             ),
+            
+
         ],
       ),
       ),
       body: Stack(
         children: [
-          // Menu Button (only show when not in immersive mode)
-          if (!_isImmersiveMode)
-            Positioned(
-              top: 40,
-              left: 20,
-              child: Builder(
-                builder: (context) => IconButton(
-                  icon: const Icon(Icons.menu, color: Colors.white, size: 30),
-                  onPressed: () => Scaffold.of(context).openDrawer(),
-                ),
-              ),
-            ),
-          
-          // Alternative menu access when in immersive mode (tap)
-          if (_isImmersiveMode)
-            Positioned(
-              top: 10,
-              left: 10,
-              child: Builder(
-                builder: (context) => GestureDetector(
-                  onTap: () => Scaffold.of(context).openDrawer(),
-                  child: Container(
-                    width: 40,
-                    height: 40,
-                    decoration: BoxDecoration(
-                      color: Colors.black26,
-                      borderRadius: BorderRadius.circular(20),
-                    ),
-                    child: const Icon(Icons.menu, color: Colors.white54, size: 20),
+          // Menu Button
+          Positioned(
+            top: 10,
+            left: 10,
+            child: Builder(
+              builder: (context) => GestureDetector(
+                onTap: () => Scaffold.of(context).openDrawer(),
+                child: Container(
+                  width: 40,
+                  height: 40,
+                  decoration: BoxDecoration(
+                    color: Colors.black26,
+                    borderRadius: BorderRadius.circular(20),
                   ),
+                  child: const Icon(Icons.menu, color: Colors.white54, size: 20),
                 ),
               ),
             ),
+          ),
           
           // Main Content
           Column(
@@ -478,27 +497,88 @@ class _PocketPadHomeState extends State<PocketPadHome> {
                   child: Listener(
                     behavior: HitTestBehavior.opaque,
                     onPointerDown: (PointerDownEvent event) {
-                      _lastTouchPosition = event.localPosition;
-                      _isDragging = true;
-                      _sendTouchEvent(0, 0, 'down');
+                      _activePointers[event.pointer] = event.localPosition;
+                      
+                      if (_activePointers.length == 1) {
+                        // Single finger - start normal tracking
+                        _lastTouchPosition = event.localPosition;
+                        _isDragging = true;
+                        _sendTouchEvent(0, 0, 'down');
+                      } else if (_activePointers.length == 2) {
+                        // Two fingers - initialize two-finger tracking
+                        _isDragging = false; // Stop single finger mode
+                        final positions = _activePointers.values.toList();
+                        _lastTwoFingerCenter = Offset(
+                          (positions[0].dx + positions[1].dx) / 2,
+                          (positions[0].dy + positions[1].dy) / 2,
+                        );
+                      }
+                      
+                      // Hide UI on touch
+                      SystemChrome.setEnabledSystemUIMode(SystemUiMode.leanBack);
                     },
                     onPointerMove: (PointerMoveEvent event) {
-                      if (!_isDragging || _lastTouchPosition == null) return;
+                      _activePointers[event.pointer] = event.localPosition;
                       
-                      final currentPosition = event.localPosition;
-                      final deltaX = (currentPosition.dx - _lastTouchPosition!.dx) * 2;
-                      final deltaY = (currentPosition.dy - _lastTouchPosition!.dy) * 2;
-                      
-                      // Only send if movement is significant
-                      final distance = (deltaX * deltaX + deltaY * deltaY);
-                      if (distance > _movementThreshold * _movementThreshold) {
-                        _sendRelativeMovement(deltaX, deltaY);
-                        _lastTouchPosition = currentPosition;
+                      if (_activePointers.length == 1 && _isDragging) {
+                        // Single finger movement
+                        if (_lastTouchPosition == null) return;
+                        
+                        final currentPosition = event.localPosition;
+                        final deltaX = (currentPosition.dx - _lastTouchPosition!.dx) * 2;
+                        final deltaY = (currentPosition.dy - _lastTouchPosition!.dy) * 2;
+                        
+                        final distance = (deltaX * deltaX + deltaY * deltaY);
+                        if (distance > _movementThreshold * _movementThreshold) {
+                          _sendRelativeMovement(deltaX, deltaY);
+                          _lastTouchPosition = currentPosition;
+                          if (!_sessionLogged) {
+                            print('🖱️ 1-finger move');
+                            _sessionLogged = true;
+                          }
+                        }
+                      } else if (_activePointers.length == 2) {
+                        // Two finger gestures
+                        final positions = _activePointers.values.toList();
+                        final currentCenter = Offset(
+                          (positions[0].dx + positions[1].dx) / 2,
+                          (positions[0].dy + positions[1].dy) / 2,
+                        );
+                        final currentDistance = _calculateDistance(positions[0], positions[1]);
+                        
+                        // Two-finger cursor movement
+                        if (_lastTwoFingerCenter != null) {
+                          final deltaX = (currentCenter.dx - _lastTwoFingerCenter!.dx) * 1.5;
+                          final deltaY = (currentCenter.dy - _lastTwoFingerCenter!.dy) * 1.5;
+                          
+                          final distance = (deltaX * deltaX + deltaY * deltaY);
+                          if (distance > _movementThreshold * _movementThreshold) {
+                            _sendRelativeMovement(deltaX, deltaY);
+                            _lastTwoFingerCenter = currentCenter;
+                            if (!_sessionLogged) {
+                              print('🖱️ 2-finger move');
+                              _sessionLogged = true;
+                            }
+                          }
+                        }
+
                       }
                     },
                     onPointerUp: (PointerUpEvent event) {
-                      _isDragging = false;
-                      _sendTouchEvent(0, 0, 'up');
+                      _activePointers.remove(event.pointer);
+                      
+                      if (_activePointers.isEmpty) {
+                        // All fingers lifted
+                        _isDragging = false;
+                        _lastTwoFingerCenter = null;
+                        _sessionLogged = false; // Reset session log
+                        _sendTouchEvent(0, 0, 'up');
+                      } else if (_activePointers.length == 1 && _lastTwoFingerCenter == null) {
+                        // Back to single finger (only if not in 2-finger session)
+                        _lastTouchPosition = _activePointers.values.first;
+                        _isDragging = true;
+                      }
+                      // If in 2-finger session, ignore single finger lift - wait for both fingers to lift
                     },
                     child: Container(
                       width: double.infinity,
@@ -510,9 +590,7 @@ class _PocketPadHomeState extends State<PocketPadHome> {
                       ),
                       child: Center(
                         child: Text(
-                          _isImmersiveMode 
-                            ? '📱 Touch Area\n\nDrag to move cursor relatively\nCursor continues from last position\n\n(Tap top-left corner for menu)'
-                            : '📱 Touch Area\n\nDrag to move cursor relatively\nCursor continues from last position\n\n(Relative movement mode)',
+                          '📱 Touch Area\n\n1 finger: Move cursor relatively\n2 fingers: Move cursor\n\nCursor continues from last position\n(Tap top-left corner for menu)',
                           textAlign: TextAlign.center,
                           style: TextStyle(fontSize: 16, color: Colors.grey[300]),
                         ),
