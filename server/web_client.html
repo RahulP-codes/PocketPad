@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>PocketPad Web Test</title>
+    <style>
+        body { font-family: Arial; margin: 20px; }
+        #touchpad { 
+            width: 400px; 
+            height: 300px; 
+            border: 2px solid #333; 
+            background: #f0f0f0;
+            cursor: crosshair;
+            margin: 20px 0;
+        }
+        .status { padding: 10px; margin: 10px 0; }
+        .connected { background: #d4edda; color: #155724; }
+        .disconnected { background: #f8d7da; color: #721c24; }
+    </style>
+</head>
+<body>
+    <h1>🖱️ PocketPad Web Test</h1>
+    <div id="status" class="status disconnected">❌ Disconnected</div>
+    
+    <div id="touchpad"></div>
+    
+    <button onclick="connect()">Connect to Server</button>
+    <button onclick="testClick()">Test Click</button>
+    
+    <script>
+        let ws = null;
+        
+        function connect() {
+            ws = new WebSocket('ws://localhost:8765');
+            
+            ws.onopen = function() {
+                document.getElementById('status').innerHTML = '✅ Connected';
+                document.getElementById('status').className = 'status connected';
+            };
+            
+            ws.onclose = function() {
+                document.getElementById('status').innerHTML = '❌ Disconnected';
+                document.getElementById('status').className = 'status disconnected';
+            };
+        }
+        
+        function sendTouch(x, y, type = 'move') {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                const message = {
+                    type: type,
+                    x: x,
+                    y: y
+                };
+                ws.send(JSON.stringify(message));
+            }
+        }
+        
+        function testClick() {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({type: 'click', button: 'left'}));
+            }
+        }
+        
+        // Touch/Mouse events on touchpad
+        const touchpad = document.getElementById('touchpad');
+        
+        touchpad.addEventListener('mousemove', function(e) {
+            const rect = touchpad.getBoundingClientRect();
+            const x = e.clientX - rect.left;
+            const y = e.clientY - rect.top;
+            
+            // Scale to screen coordinates (adjust as needed)
+            const screenX = Math.round(x * 4);  // Scale up
+            const screenY = Math.round(y * 4);
+            
+            sendTouch(screenX, screenY, 'move');
+        });
+        
+        touchpad.addEventListener('mousedown', function(e) {
+            sendTouch(0, 0, 'down');
+        });
+        
+        touchpad.addEventListener('mouseup', function(e) {
+            sendTouch(0, 0, 'up');
+        });
+    </script>
+</body>
+</html>
