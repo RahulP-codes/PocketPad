@@ -3,8 +3,20 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 import 'dart:convert';
 import 'dart:async';
 import 'dart:io';
+import 'package:flutter/services.dart';
 
 void main() {
+  WidgetsFlutterBinding.ensureInitialized();
+  
+  // Lock orientation to landscape
+  SystemChrome.setPreferredOrientations([
+    DeviceOrientation.landscapeLeft,
+    DeviceOrientation.landscapeRight,
+  ]);
+  
+  // Hide status bar and navigation bar (lean back mode)
+  SystemChrome.setEnabledSystemUIMode(SystemUiMode.leanBack);
+  
   runApp(const PocketPadApp());
 }
 
@@ -16,7 +28,10 @@ class PocketPadApp extends StatelessWidget {
     return MaterialApp(
       title: 'PocketPad',
       theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(seedColor: Colors.blue),
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: Colors.blue,
+          brightness: Brightness.dark,
+        ),
         useMaterial3: true,
       ),
       home: const PocketPadHome(),
@@ -37,6 +52,12 @@ class _PocketPadHomeState extends State<PocketPadHome> {
   bool _isScanning = false;
   String _serverIp = '';
   String _statusMessage = 'Ready to scan';
+  bool _isImmersiveMode = true; // Track immersive mode state
+  
+  // For relative movement tracking
+  Offset? _lastTouchPosition;
+  bool _isDragging = false;
+  static const double _movementThreshold = 2.0; // Minimum movement to register
 
   @override
   void initState() {
@@ -47,6 +68,22 @@ class _PocketPadHomeState extends State<PocketPadHome> {
     });
     // Start connection monitoring
     _startConnectionMonitoring();
+  }
+
+  void _toggleImmersiveMode() {
+    setState(() {
+      _isImmersiveMode = !_isImmersiveMode;
+    });
+    
+    if (_isImmersiveMode) {
+      // Lean back mode prevents edge gestures
+      SystemChrome.setEnabledSystemUIMode(SystemUiMode.leanBack);
+    } else {
+      SystemChrome.setEnabledSystemUIMode(
+        SystemUiMode.manual,
+        overlays: [SystemUiOverlay.top, SystemUiOverlay.bottom],
+      );
+    }
   }
 
   void _startConnectionMonitoring() {
@@ -287,6 +324,26 @@ class _PocketPadHomeState extends State<PocketPadHome> {
       _reconnectToKnownServer();
     }
   }
+  
+  void _sendRelativeMovement(double deltaX, double deltaY) {
+    if (_channel != null && _isConnected) {
+      try {
+        final message = json.encode({
+          'type': 'move_relative',
+          'deltaX': deltaX.round(),
+          'deltaY': deltaY.round(),
+        });
+        _channel!.sink.add(message);
+      } catch (e) {
+        print('❌ Send failed: $e');
+        setState(() {
+          _isConnected = false;
+          _statusMessage = 'Send failed - reconnecting...';
+        });
+        _reconnectToKnownServer();
+      }
+    }
+  }
 
   @override
   void dispose() {
@@ -297,101 +354,174 @@ class _PocketPadHomeState extends State<PocketPadHome> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        backgroundColor: Theme.of(context).colorScheme.inversePrimary,
-        title: const Text('🖱️ PocketPad'),
-      ),
-      body: Column(
-        children: [
-          // Connection Status
-          Container(
-            width: double.infinity,
-            padding: const EdgeInsets.all(16),
-            color: _isConnected ? Colors.green : (_isScanning ? Colors.orange : Colors.red),
-            child: Text(
-              _isConnected 
-                ? '✅ Connected to $_serverIp:8765'
-                : (_isScanning ? '🔍 $_statusMessage' : '❌ $_statusMessage'),
-              style: const TextStyle(color: Colors.white, fontSize: 16),
-              textAlign: TextAlign.center,
-            ),
-          ),
-          
-          // Connect/Scan Button
-          if (!_isConnected && !_isScanning)
-            Padding(
-              padding: const EdgeInsets.all(16),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+      drawer: Drawer(
+        child: ListView(
+          padding: EdgeInsets.zero,
+          children: [
+            DrawerHeader(
+              decoration: BoxDecoration(
+                color: _isConnected ? Colors.green : (_isScanning ? Colors.orange : Colors.red),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  ElevatedButton(
-                    onPressed: _connectToServer,
-                    child: Text(_serverIp.isEmpty ? 'Scan for Server' : 'Reconnect'),
+                  const Text(
+                    '🖱️ PocketPad',
+                    style: TextStyle(color: Colors.white, fontSize: 24),
                   ),
-                  if (_serverIp.isNotEmpty)
-                    ElevatedButton(
-                      onPressed: () {
-                        setState(() => _serverIp = '');
-                        _scanForServer();
-                      },
-                      child: const Text('Scan Again'),
-                    ),
+                  const SizedBox(height: 10),
+                  Text(
+                    _isConnected 
+                      ? '✅ Connected to $_serverIp:8765'
+                      : (_isScanning ? '🔍 $_statusMessage' : '❌ $_statusMessage'),
+                    style: const TextStyle(color: Colors.white, fontSize: 14),
+                  ),
                 ],
               ),
             ),
-          
-          // Stop Scanning Button
-          if (_isScanning)
+            
+            // Connect/Scan Button
+            if (!_isConnected && !_isScanning)
+              Padding(
+                padding: const EdgeInsets.all(16),
+                child: Column(
+                  children: [
+                    ElevatedButton(
+                      onPressed: _connectToServer,
+                      child: Text(_serverIp.isEmpty ? 'Scan for Server' : 'Reconnect'),
+                    ),
+                    if (_serverIp.isNotEmpty)
+                      const SizedBox(height: 10),
+                    if (_serverIp.isNotEmpty)
+                      ElevatedButton(
+                        onPressed: () {
+                          setState(() => _serverIp = '');
+                          _scanForServer();
+                        },
+                        child: const Text('Scan Again'),
+                      ),
+                  ],
+                ),
+              ),
+            
+            // Stop Scanning Button
+            if (_isScanning)
+              Padding(
+                padding: const EdgeInsets.all(16),
+                child: ElevatedButton(
+                  onPressed: () => setState(() => _isScanning = false),
+                  child: const Text('Stop Scanning'),
+                ),
+              ),
+            
+            // Immersive Mode Toggle
             Padding(
               padding: const EdgeInsets.all(16),
-              child: ElevatedButton(
-                onPressed: () => setState(() => _isScanning = false),
-                child: const Text('Stop Scanning'),
+              child: SwitchListTile(
+                title: const Text('Lock Navigation Bars'),
+                subtitle: Text(_isImmersiveMode 
+                  ? 'Locked (prevents edge swipe gestures)' 
+                  : 'Unlocked (edge swipes work)'),
+                value: _isImmersiveMode,
+                onChanged: (value) => _toggleImmersiveMode(),
+                secondary: Icon(_isImmersiveMode ? Icons.lock : Icons.lock_open),
+              ),
+            ),
+        ],
+      ),
+      ),
+      body: Stack(
+        children: [
+          // Menu Button (only show when not in immersive mode)
+          if (!_isImmersiveMode)
+            Positioned(
+              top: 40,
+              left: 20,
+              child: Builder(
+                builder: (context) => IconButton(
+                  icon: const Icon(Icons.menu, color: Colors.white, size: 30),
+                  onPressed: () => Scaffold.of(context).openDrawer(),
+                ),
               ),
             ),
           
-          // Touch Area - Fixed for all positions
-          Expanded(
-            child: Container(
-              width: double.infinity,
-              margin: const EdgeInsets.all(16),
-              child: Listener(
-                behavior: HitTestBehavior.opaque,
-                onPointerDown: (PointerDownEvent event) {
-                  final RenderBox box = context.findRenderObject() as RenderBox;
-                  final Offset localPosition = box.globalToLocal(event.position);
-                  final x = localPosition.dx * 2;
-                  final y = localPosition.dy * 2;
-                  _sendTouchEvent(x, y, 'down');
-                },
-                onPointerMove: (PointerMoveEvent event) {
-                  final RenderBox box = context.findRenderObject() as RenderBox;
-                  final Offset localPosition = box.globalToLocal(event.position);
-                  final x = localPosition.dx * 2;
-                  final y = localPosition.dy * 2;
-                  _sendTouchEvent(x, y, 'move');
-                },
-                onPointerUp: (PointerUpEvent event) {
-                  _sendTouchEvent(0, 0, 'up');
-                },
-                child: Container(
-                  width: double.infinity,
-                  height: double.infinity,
-                  decoration: BoxDecoration(
-                    color: Colors.grey[200],
-                    border: Border.all(color: Colors.grey),
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                  child: const Center(
-                    child: Text(
-                      '📱 Touch Area\n\nMove your finger here to control laptop mouse\n\n(Works from any position)',
-                      textAlign: TextAlign.center,
-                      style: TextStyle(fontSize: 18, color: Colors.grey),
+          // Alternative menu access when in immersive mode (tap)
+          if (_isImmersiveMode)
+            Positioned(
+              top: 10,
+              left: 10,
+              child: Builder(
+                builder: (context) => GestureDetector(
+                  onTap: () => Scaffold.of(context).openDrawer(),
+                  child: Container(
+                    width: 40,
+                    height: 40,
+                    decoration: BoxDecoration(
+                      color: Colors.black26,
+                      borderRadius: BorderRadius.circular(20),
                     ),
+                    child: const Icon(Icons.menu, color: Colors.white54, size: 20),
                   ),
                 ),
               ),
             ),
+          
+          // Main Content
+          Column(
+            children: [
+              
+              // Touch Area - Fixed for all positions
+              Expanded(
+                child: Container(
+                  width: double.infinity,
+                  margin: const EdgeInsets.symmetric(vertical: 16, horizontal: 60),
+                  child: Listener(
+                    behavior: HitTestBehavior.opaque,
+                    onPointerDown: (PointerDownEvent event) {
+                      _lastTouchPosition = event.localPosition;
+                      _isDragging = true;
+                      _sendTouchEvent(0, 0, 'down');
+                    },
+                    onPointerMove: (PointerMoveEvent event) {
+                      if (!_isDragging || _lastTouchPosition == null) return;
+                      
+                      final currentPosition = event.localPosition;
+                      final deltaX = (currentPosition.dx - _lastTouchPosition!.dx) * 2;
+                      final deltaY = (currentPosition.dy - _lastTouchPosition!.dy) * 2;
+                      
+                      // Only send if movement is significant
+                      final distance = (deltaX * deltaX + deltaY * deltaY);
+                      if (distance > _movementThreshold * _movementThreshold) {
+                        _sendRelativeMovement(deltaX, deltaY);
+                        _lastTouchPosition = currentPosition;
+                      }
+                    },
+                    onPointerUp: (PointerUpEvent event) {
+                      _isDragging = false;
+                      _sendTouchEvent(0, 0, 'up');
+                    },
+                    child: Container(
+                      width: double.infinity,
+                      height: double.infinity,
+                      decoration: BoxDecoration(
+                        color: Colors.grey[800],
+                        border: Border.all(color: Colors.grey[600]!),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: Center(
+                        child: Text(
+                          _isImmersiveMode 
+                            ? '📱 Touch Area\n\nDrag to move cursor relatively\nCursor continues from last position\n\n(Tap top-left corner for menu)'
+                            : '📱 Touch Area\n\nDrag to move cursor relatively\nCursor continues from last position\n\n(Relative movement mode)',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(fontSize: 16, color: Colors.grey[300]),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ],
           ),
         ],
       ),

@@ -6,8 +6,14 @@ from mouse_controller import MouseController
 # Create mouse controller
 mouse = MouseController()
 
+# Track current cursor position
+current_x, current_y = mouse.mouse.position
+
 async def handle_client(websocket, path):
     print("📱 Client connected!")
+    
+    # Declare global variables at the start
+    global current_x, current_y
     
     # Simple keepalive without WebSocket ping/pong
     last_message_time = asyncio.get_event_loop().time()
@@ -55,10 +61,18 @@ async def handle_client(websocket, path):
             
             print(f"Received: {data}")
             
-            # Handle mouse control - ONLY MOVEMENT (clicks disabled)
+            # Handle mouse control - RELATIVE MOVEMENT
             if data['type'] == 'move':
+                # Absolute movement (old method)
                 mouse.move_to(data['x'], data['y'])
+                current_x, current_y = data['x'], data['y']
                 print(f"🖱️ Moved to: ({data['x']}, {data['y']})")
+            elif data['type'] == 'move_relative':
+                # Relative movement (new method)
+                current_x += data['deltaX']
+                current_y += data['deltaY']
+                mouse.move_to(current_x, current_y)
+                print(f"🖱️ Relative move: delta({data['deltaX']}, {data['deltaY']}) -> ({current_x}, {current_y})")
             elif data['type'] == 'down':
                 # mouse.press('left')  # DISABLED
                 print("🖱️ Mouse down (disabled)")
@@ -94,7 +108,7 @@ async def start_server():
         max_size=None,       # No message size limit
         max_queue=None       # No queue size limit
     ):
-        print("✅ Server ready! Mouse MOVEMENT only (clicks disabled) 🖱️")
+        print("✅ Server ready! RELATIVE mouse movement (clicks disabled) 🖱️")
         print("📡 Keepalive enabled (30s ping interval)")
         await asyncio.Future()
 
