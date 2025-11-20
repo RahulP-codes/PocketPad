@@ -1,30 +1,25 @@
 import asyncio
 import websockets
 import json
-from mouse_controller import MouseController
+from mouse_controller_ctypes import MouseController
+from broadcast import start_broadcast
 
-# Create mouse controller
 mouse = MouseController()
-
-# Track current cursor position
-current_x, current_y = mouse.mouse.position
+current_x, current_y = mouse.position
+click_counter = 0
 
 async def handle_client(websocket, path):
     print("📱 Client connected!")
-    
-    # Declare global variables at the start
-    global current_x, current_y
-    
-    # Simple keepalive without WebSocket ping/pong
+    global current_x, current_y, click_counter
     last_message_time = asyncio.get_event_loop().time()
     
     async def check_connection():
         nonlocal last_message_time
         try:
             while True:
-                await asyncio.sleep(30)  # Check every 30 seconds
+                await asyncio.sleep(30)
                 current_time = asyncio.get_event_loop().time()
-                if current_time - last_message_time > 60:  # No message for 60 seconds
+                if current_time - last_message_time > 60:
                     print("❌ No activity for 60 seconds, closing connection")
                     await websocket.close()
                     break
@@ -32,58 +27,59 @@ async def handle_client(websocket, path):
             print(f"❌ Connection check failed: {e}")
             return
     
-    # Start connection monitoring
+
     monitor_task = asyncio.create_task(check_connection())
     
     try:
         async for message in websocket:
             data = json.loads(message)
             
-            # Update last message time for any message
             last_message_time = asyncio.get_event_loop().time()
             
-            # Handle keepalive
             if data.get('type') == 'keepalive':
                 await websocket.send("✅ keepalive_ok")
                 print("📡 Keepalive received")
                 continue
             
-            # Handle connection test
+
             if data.get('type') == 'connection_test':
                 await websocket.send("✅ connection_confirmed")
                 print("🔍 Connection test confirmed")
                 continue
             
-            # Handle health check
+
             if data.get('type') == 'health_check':
                 await websocket.send("✅ health_ok")
                 continue
             
             print(f"Received: {data}")
             
-            # Handle mouse control - RELATIVE MOVEMENT
+
             if data['type'] == 'move':
-                # Absolute movement (old method)
+
                 mouse.move_to(data['x'], data['y'])
-                current_x, current_y = data['x'], data['y']
+                current_x, current_y = mouse.position
                 print(f"🖱️ Moved to: ({data['x']}, {data['y']})")
             elif data['type'] == 'move_relative':
-                # Relative movement (new method)
-                current_x += data['deltaX']
-                current_y += data['deltaY']
-                mouse.move_to(current_x, current_y)
-                print(f"🖱️ Relative move: delta({data['deltaX']}, {data['deltaY']}) -> ({current_x}, {current_y})")
+                mouse.move_relative(data['deltaX'], data['deltaY'])
+                current_x, current_y = mouse.position
+                print(f"🖱️ 1-finger move+click: delta({data['deltaX']}, {data['deltaY']}) -> ({current_x}, {current_y})")
+            elif data['type'] == 'hover_move':
+                mouse.move_relative(data['deltaX'], data['deltaY'])
+                current_x, current_y = mouse.position
+                print(f"🖱️ 2-finger hover: delta({data['deltaX']}, {data['deltaY']}) -> ({current_x}, {current_y})")
             elif data['type'] == 'down':
-                # mouse.press('left')  # DISABLED
-                print("🖱️ Mouse down (disabled)")
+                current_x, current_y = mouse.position
+                mouse.press('left')
+                print("🖱️ Mouse down (1-finger click ON)")
             elif data['type'] == 'up':
-                # mouse.release('left')  # DISABLED
-                print("🖱️ Mouse up (disabled)")
+                mouse.release('left')
+                print("🖱️ Mouse up (1-finger click OFF)")
             elif data['type'] == 'click':
-                # mouse.click(data.get('button', 'left'))  # DISABLED
-                print("🖱️ Click (disabled)")
+                mouse.click(data.get('button', 'left'))
+                print("🖱️ Click")
             
-            # Echo back
+
             await websocket.send(f"✅ {data['type']}")
             
     except websockets.exceptions.ConnectionClosed:
@@ -96,19 +92,20 @@ async def handle_client(websocket, path):
 
 async def start_server():
     print("🚀 PocketPad server starting on port 8765...")
+    start_broadcast()
+    print("📡 Broadcasting server presence...")
     
-    # Server with disabled WebSocket ping/pong to avoid timeout issues
     async with websockets.serve(
         handle_client, 
         "0.0.0.0", 
         8765,
-        ping_interval=None,  # Disable automatic ping
-        ping_timeout=None,   # Disable ping timeout
-        close_timeout=10,    # Wait 10 seconds before force close
-        max_size=None,       # No message size limit
-        max_queue=None       # No queue size limit
+        ping_interval=None,
+        ping_timeout=None,
+        close_timeout=10,
+        max_size=None,
+        max_queue=None
     ):
-        print("✅ Server ready! RELATIVE mouse movement (clicks disabled) 🖱️")
+        print("✅ Server ready! 1-finger=click+move, 2-finger=hover only 🖱️")
         print("📡 Keepalive enabled (30s ping interval)")
         await asyncio.Future()
 

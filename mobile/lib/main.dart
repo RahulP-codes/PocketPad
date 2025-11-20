@@ -5,6 +5,7 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:math';
 import 'package:flutter/services.dart';
+import 'package:network_info_plus/network_info_plus.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -58,29 +59,31 @@ class _PocketPadHomeState extends State<PocketPadHome> {
   // For relative movement tracking
   Offset? _lastTouchPosition;
   bool _isDragging = false;
-  static const double _movementThreshold = 2.0; // Minimum movement to register
+  static const double _movementThreshold = 0.5; // Minimum movement to register
   
   // For two-finger gestures
-  Map<int, Offset> _activePointers = {};
+  final Map<int, Offset> _activePointers = {};
   Offset? _lastTwoFingerCenter;
   bool _sessionLogged = false; // Track if session already logged
   double _zoomLevel = 1.0; // Zoom level control
+  bool _isTwoFingerMode = false; // Track if in 2-finger mode
+  Timer? _clickDelayTimer; // Delay timer for click detection
 
   @override
   void initState() {
     super.initState();
-    // Auto-scan on app start
+
     Future.delayed(Duration(milliseconds: 500), () {
       _scanForServer();
     });
-    // Start connection monitoring
+
     _startConnectionMonitoring();
-    // Start auto-hide timer
+
     _startAutoHideTimer();
   }
 
   void _startAutoHideTimer() {
-    // Hide UI after 3 seconds of no interaction
+
     Timer.periodic(Duration(seconds: 3), (timer) {
       SystemChrome.setEnabledSystemUIMode(SystemUiMode.leanBack);
     });
@@ -89,23 +92,23 @@ class _PocketPadHomeState extends State<PocketPadHome> {
 
 
   void _startConnectionMonitoring() {
-    // Check connection every 3 seconds (more frequent)
+
     Timer.periodic(Duration(seconds: 3), (timer) {
       if (!_isConnected && !_isScanning && _serverIp.isNotEmpty) {
-        // Auto-reconnecting silently
+
         _reconnectToKnownServer();
       }
     });
     
-    // Connection health check every 10 seconds
+
     Timer.periodic(Duration(seconds: 10), (timer) {
       if (_isConnected && _channel != null) {
         try {
-          // Test connection with a small message
+
           final healthCheck = json.encode({'type': 'health_check'});
           _channel!.sink.add(healthCheck);
         } catch (e) {
-          // Health check failed
+
           setState(() {
             _isConnected = false;
             _statusMessage = 'Health check failed - reconnecting...';
@@ -116,10 +119,12 @@ class _PocketPadHomeState extends State<PocketPadHome> {
     });
   }
 
-  // Common IP ranges to scan
+
   List<String> _getIPsToScan() {
     return [
-      '10.21.109.77', '10.140.84.21', // Your current IPs first
+      '10.130.84.77',
+      '10.248.231.157', '192.168.0.103',
+      '10.21.109.77', '10.140.84.21',
       '192.168.1.100', '192.168.1.101', '192.168.1.102', '192.168.1.1',
       '192.168.0.100', '192.168.0.101', '192.168.0.102', '192.168.0.1',
       '10.0.0.100', '10.0.0.101', '10.0.0.1',
@@ -130,35 +135,71 @@ class _PocketPadHomeState extends State<PocketPadHome> {
   Future<void> _scanForServer() async {
     setState(() {
       _isScanning = true;
-      _statusMessage = 'Scanning for PocketPad server...';
+      _statusMessage = 'Listening for server broadcast...';
     });
 
+    try {
+      final socket = await RawDatagramSocket.bind(InternetAddress.anyIPv4, 8766);
+      socket.broadcastEnabled = true;
+      
+      final timeout = Timer(Duration(seconds: 5), () {
+        socket.close();
+      });
+      
+      socket.listen((event) {
+        if (event == RawSocketEvent.read) {
+          final packet = socket.receive();
+          if (packet != null) {
+            final message = String.fromCharCodes(packet.data);
+            if (message.startsWith('POCKETPAD_SERVER:')) {
+              final serverIp = packet.address.address;
+              timeout.cancel();
+              socket.close();
+              _connectToDiscoveredServer(serverIp);
+            }
+          }
+        }
+      });
+      
+      await Future.delayed(Duration(seconds: 5));
+      if (_isScanning) {
+        setState(() {
+          _statusMessage = 'No broadcast found, trying manual scan...';
+        });
+        _manualScan();
+      }
+    } catch (e) {
+      _manualScan();
+    }
+  }
+  
+  Future<void> _manualScan() async {
     final ipsToScan = _getIPsToScan();
     
     for (String ip in ipsToScan) {
-      if (!_isScanning) break; // Stop if user cancels
+      if (!_isScanning) break;
       
       setState(() {
         _statusMessage = 'Trying $ip...';
       });
 
       try {
-        // Test WebSocket connection
+
         final channel = WebSocketChannel.connect(
           Uri.parse('ws://$ip:8765'),
         );
         
-        // Send a test message and wait for response
+
         final testMessage = json.encode({'type': 'connection_test'});
         channel.sink.add(testMessage);
         
-        // Wait for actual response or timeout (3 seconds)
+
         final response = await Future.any([
           channel.stream.first.timeout(Duration(seconds: 3)),
           Future.delayed(Duration(seconds: 3)).then((_) => throw TimeoutException('Connection timeout', Duration(seconds: 3))),
         ]);
         
-        // If we get a response, connection is real
+
         if (response != null) {
           setState(() {
             _serverIp = ip;
@@ -169,36 +210,55 @@ class _PocketPadHomeState extends State<PocketPadHome> {
           });
           
           _setupChannelListeners();
-          return; // Success! Stop scanning
+          return;
         }
         
       } catch (e) {
-        // Connection failed, try next IP
+
         continue;
       }
     }
     
-    // No server found
+
     setState(() {
       _isScanning = false;
       _statusMessage = 'No PocketPad server found. Make sure server is running.';
     });
   }
+  
+  Future<void> _connectToDiscoveredServer(String ip) async {
+    setState(() {
+      _statusMessage = 'Found server at $ip, connecting...';
+    });
+    
+    try {
+      final channel = WebSocketChannel.connect(Uri.parse('ws://$ip:8765'));
+      final testMessage = json.encode({'type': 'connection_test'});
+      channel.sink.add(testMessage);
+      await channel.stream.first.timeout(Duration(seconds: 3));
+      
+      setState(() {
+        _serverIp = ip;
+        _channel = channel;
+        _isConnected = true;
+        _isScanning = false;
+        _statusMessage = 'Connected to $ip';
+      });
+      
+      _setupChannelListeners();
+    } catch (e) {
+      _manualScan();
+    }
+  }
 
   void _setupChannelListeners() {
     _channel?.stream.listen(
-      (message) {
-        // Server response received
-        // All server messages indicate the connection is alive
-        // WebSocket library handles ping/pong automatically
-      },
+      (message) {},
       onError: (error) {
-        // Connection error
         setState(() {
           _isConnected = false;
           _statusMessage = 'Connection lost - will auto-reconnect';
         });
-        // Auto-reconnect after 2 seconds
         Future.delayed(Duration(seconds: 2), () {
           if (!_isConnected && !_isScanning) {
             _reconnectToKnownServer();
@@ -206,12 +266,10 @@ class _PocketPadHomeState extends State<PocketPadHome> {
         });
       },
       onDone: () {
-        // Connection closed
         setState(() {
           _isConnected = false;
           _statusMessage = 'Disconnected - will auto-reconnect';
         });
-        // Auto-reconnect after 2 seconds
         Future.delayed(Duration(seconds: 2), () {
           if (!_isConnected && !_isScanning) {
             _reconnectToKnownServer();
@@ -220,21 +278,16 @@ class _PocketPadHomeState extends State<PocketPadHome> {
       },
     );
     
-    // Start simpler keepalive
     _startSimpleKeepAlive();
   }
 
   void _startSimpleKeepAlive() {
-    // Send simple keepalive every 10 seconds
     Timer.periodic(Duration(seconds: 10), (timer) {
       if (_isConnected && _channel != null) {
         try {
-          // Send a simple message to keep connection alive
           final keepalive = json.encode({'type': 'keepalive'});
           _channel!.sink.add(keepalive);
-          // Keepalive sent
         } catch (e) {
-          // Keepalive failed
           timer.cancel();
           setState(() {
             _isConnected = false;
@@ -267,20 +320,20 @@ class _PocketPadHomeState extends State<PocketPadHome> {
     });
 
     try {
-      _channel?.sink.close(); // Close old connection
+      _channel?.sink.close();
       
       final channel = WebSocketChannel.connect(
         Uri.parse('ws://$_serverIp:8765'),
       );
       
-      // Test the connection with a real message
+
       final testMessage = json.encode({'type': 'connection_test'});
       channel.sink.add(testMessage);
       
-      // Wait for response to confirm connection
+
       await channel.stream.first.timeout(Duration(seconds: 3));
       
-      // Connection confirmed
+
       setState(() {
         _channel = channel;
         _isConnected = true;
@@ -288,15 +341,12 @@ class _PocketPadHomeState extends State<PocketPadHome> {
       });
       
       _setupChannelListeners();
-      // Reconnected successfully
-      
     } catch (e) {
-      // Reconnection failed
       setState(() {
         _isConnected = false;
         _statusMessage = 'Reconnection failed - scanning for server...';
       });
-      // Fallback to full scan
+
       Future.delayed(Duration(seconds: 2), () {
         _scanForServer();
       });
@@ -313,7 +363,6 @@ class _PocketPadHomeState extends State<PocketPadHome> {
         });
         _channel!.sink.add(message);
       } catch (e) {
-        // Send failed
         setState(() {
           _isConnected = false;
           _statusMessage = 'Send failed - reconnecting...';
@@ -321,8 +370,26 @@ class _PocketPadHomeState extends State<PocketPadHome> {
         _reconnectToKnownServer();
       }
     } else if (!_isConnected && !_isScanning) {
-      // Auto-reconnect if not connected
       _reconnectToKnownServer();
+    }
+  }
+  
+  void _sendHoverMovement(double deltaX, double deltaY) {
+    if (_channel != null && _isConnected) {
+      try {
+        final message = json.encode({
+          'type': 'hover_move',
+          'deltaX': deltaX.round(),
+          'deltaY': deltaY.round(),
+        });
+        _channel!.sink.add(message);
+      } catch (e) {
+        setState(() {
+          _isConnected = false;
+          _statusMessage = 'Send failed - reconnecting...';
+        });
+        _reconnectToKnownServer();
+      }
     }
   }
   
@@ -336,7 +403,6 @@ class _PocketPadHomeState extends State<PocketPadHome> {
         });
         _channel!.sink.add(message);
       } catch (e) {
-        // Send failed
         setState(() {
           _isConnected = false;
           _statusMessage = 'Send failed - reconnecting...';
@@ -354,10 +420,7 @@ class _PocketPadHomeState extends State<PocketPadHome> {
           'level': level,
         });
         _channel!.sink.add(message);
-        print('🔍 Zoom level: ${level.toStringAsFixed(1)}x');
-      } catch (e) {
-        // Zoom send failed
-      }
+      } catch (e) {}
     }
   }
   
@@ -369,6 +432,7 @@ class _PocketPadHomeState extends State<PocketPadHome> {
 
   @override
   void dispose() {
+    _clickDelayTimer?.cancel();
     _channel?.sink.close();
     super.dispose();
   }
@@ -499,22 +563,34 @@ class _PocketPadHomeState extends State<PocketPadHome> {
                     onPointerDown: (PointerDownEvent event) {
                       _activePointers[event.pointer] = event.localPosition;
                       
-                      if (_activePointers.length == 1) {
-                        // Single finger - start normal tracking
+                      if (_activePointers.length == 1 && !_isTwoFingerMode) {
                         _lastTouchPosition = event.localPosition;
-                        _isDragging = true;
-                        _sendTouchEvent(0, 0, 'down');
+                        _clickDelayTimer?.cancel();
+                        
+                        _clickDelayTimer = Timer(Duration(milliseconds: 100), () {
+                          if (_activePointers.length == 1 && !_isTwoFingerMode) {
+                            _isDragging = true;
+                            _sendTouchEvent(0, 0, 'down');
+                          }
+                        });
                       } else if (_activePointers.length == 2) {
-                        // Two fingers - initialize two-finger tracking
-                        _isDragging = false; // Stop single finger mode
+                        _clickDelayTimer?.cancel();
+                        _isTwoFingerMode = true;
+                        
+                        if (_isDragging) {
+                          _sendTouchEvent(0, 0, 'up');
+                          _isDragging = false;
+                        }
+                        
                         final positions = _activePointers.values.toList();
                         _lastTwoFingerCenter = Offset(
                           (positions[0].dx + positions[1].dx) / 2,
                           (positions[0].dy + positions[1].dy) / 2,
                         );
+                      } else {
+                        _activePointers.remove(event.pointer);
                       }
                       
-                      // Hide UI on touch
                       SystemChrome.setEnabledSystemUIMode(SystemUiMode.leanBack);
                     },
                     onPointerMove: (PointerMoveEvent event) {
@@ -525,60 +601,62 @@ class _PocketPadHomeState extends State<PocketPadHome> {
                         if (_lastTouchPosition == null) return;
                         
                         final currentPosition = event.localPosition;
-                        final deltaX = (currentPosition.dx - _lastTouchPosition!.dx) * 2;
-                        final deltaY = (currentPosition.dy - _lastTouchPosition!.dy) * 2;
+                        final deltaX = (currentPosition.dx - _lastTouchPosition!.dx) * 1.5;
+                        final deltaY = (currentPosition.dy - _lastTouchPosition!.dy) * 1.5;
                         
                         final distance = (deltaX * deltaX + deltaY * deltaY);
                         if (distance > _movementThreshold * _movementThreshold) {
                           _sendRelativeMovement(deltaX, deltaY);
                           _lastTouchPosition = currentPosition;
                           if (!_sessionLogged) {
-                            print('🖱️ 1-finger move');
                             _sessionLogged = true;
                           }
                         }
                       } else if (_activePointers.length == 2) {
-                        // Two finger gestures
+                        // 2-finger hover mode - NO CLICKS, only movement
                         final positions = _activePointers.values.toList();
                         final currentCenter = Offset(
                           (positions[0].dx + positions[1].dx) / 2,
                           (positions[0].dy + positions[1].dy) / 2,
                         );
-                        final currentDistance = _calculateDistance(positions[0], positions[1]);
                         
-                        // Two-finger cursor movement
+                        // Two-finger hover movement (no clicks)
                         if (_lastTwoFingerCenter != null) {
                           final deltaX = (currentCenter.dx - _lastTwoFingerCenter!.dx) * 1.5;
                           final deltaY = (currentCenter.dy - _lastTwoFingerCenter!.dy) * 1.5;
                           
                           final distance = (deltaX * deltaX + deltaY * deltaY);
                           if (distance > _movementThreshold * _movementThreshold) {
-                            _sendRelativeMovement(deltaX, deltaY);
+                            _sendHoverMovement(deltaX, deltaY);
                             _lastTwoFingerCenter = currentCenter;
                             if (!_sessionLogged) {
-                              print('🖱️ 2-finger move');
                               _sessionLogged = true;
                             }
                           }
                         }
-
                       }
                     },
                     onPointerUp: (PointerUpEvent event) {
                       _activePointers.remove(event.pointer);
                       
                       if (_activePointers.isEmpty) {
-                        // All fingers lifted
+                        // All fingers lifted - reset everything
+                        _clickDelayTimer?.cancel(); // Cancel any pending click
+                        if (_isDragging) {
+                          _sendTouchEvent(0, 0, 'up');
+                        }
                         _isDragging = false;
                         _lastTwoFingerCenter = null;
-                        _sessionLogged = false; // Reset session log
-                        _sendTouchEvent(0, 0, 'up');
-                      } else if (_activePointers.length == 1 && _lastTwoFingerCenter == null) {
-                        // Back to single finger (only if not in 2-finger session)
+                        _isTwoFingerMode = false;
+                        _sessionLogged = false;
+                      } else if (_activePointers.length == 1 && _isTwoFingerMode) {
+                        // Going from 2-finger back to 1-finger - stay in hover mode
                         _lastTouchPosition = _activePointers.values.first;
-                        _isDragging = true;
+                        _lastTwoFingerCenter = null;
+                      } else if (_activePointers.length == 1 && !_isTwoFingerMode) {
+                        // Continue existing 1-finger session
+                        _lastTouchPosition = _activePointers.values.first;
                       }
-                      // If in 2-finger session, ignore single finger lift - wait for both fingers to lift
                     },
                     child: Container(
                       width: double.infinity,
@@ -590,7 +668,7 @@ class _PocketPadHomeState extends State<PocketPadHome> {
                       ),
                       child: Center(
                         child: Text(
-                          '📱 Touch Area\n\n1 finger: Move cursor relatively\n2 fingers: Move cursor\n\nCursor continues from last position\n(Tap top-left corner for menu)',
+                          '📱 Touch Area\n\n1 finger: Click + Move (left click ON)\n2 fingers: Hover + Move (no clicking)\n\nCursor continues from last position\n(Tap top-left corner for menu)',
                           textAlign: TextAlign.center,
                           style: TextStyle(fontSize: 16, color: Colors.grey[300]),
                         ),
